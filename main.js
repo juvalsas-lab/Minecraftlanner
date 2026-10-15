@@ -68,8 +68,6 @@ skyUniforms['rayleigh'].value = 2;
 skyUniforms['mieCoefficient'].value = 0.005;
 skyUniforms['mieDirectionalG'].value = 0.8;
 
-scene.fog = new THREE.Fog(0x87ceeb, 120, 900);
-
 const gridHelper = new THREE.GridHelper(200, 200, 0x444444, 0x222222);
 gridHelper.position.y = -0.5;
 scene.add(gridHelper);
@@ -245,6 +243,41 @@ function isCrossPlant(cleanName) {
   return CROSS_PLANT_RE.test(cleanName);
 }
 
+// Blöcke mit transparenten Texturen, die als "Cutout" gerendert werden müssen
+// (transparenter Hintergrund wird per alphaTest weggeschnitten).
+function isCutoutBlock(cleanName) {
+  return cleanName === 'torch' || cleanName.endsWith('_torch') ||
+    cleanName === 'lantern' || cleanName.endsWith('_lantern') ||
+    cleanName === 'chain' || cleanName === 'rail' || cleanName.endsWith('_rail') ||
+    cleanName === 'ladder' || cleanName === 'vine' ||
+    cleanName === 'tripwire' || cleanName === 'redstone_wire';
+}
+
+// Leuchtende Blöcke (Emissive-Glow, Fackeln zusätzlich als Punktlicht).
+function isEmissiveBlock(cleanName) {
+  return cleanName === 'torch' || cleanName.endsWith('_torch') ||
+    cleanName === 'lantern' || cleanName.endsWith('_lantern') ||
+    cleanName === 'glowstone' || cleanName === 'sea_lantern' ||
+    cleanName === 'shroomlight' || cleanName === 'magma_block' ||
+    cleanName === 'lava' || cleanName === 'end_rod' ||
+    cleanName === 'jack_o_lantern' || cleanName === 'redstone_lamp' ||
+    cleanName === 'campfire' || cleanName === 'soul_campfire' ||
+    cleanName === 'crying_obsidian' || cleanName === 'respawn_anchor' ||
+    cleanName === 'beacon' || cleanName === 'conduit' || cleanName.endsWith('froglight');
+}
+
+// Farbe/Stärke eines Fackel-Lichts je Blocktyp (null = kein Punktlicht).
+function emitterInfo(rawType) {
+  const { name } = parseBlockState(rawType);
+  if (!isEmissiveBlock(name)) return null;
+  if (name.includes('soul')) return { color: 0x4fd6ff, intensity: 7, distance: 15 };
+  if (name.includes('redstone') || name === 'crying_obsidian' || name === 'respawn_anchor') return { color: 0xff4040, intensity: 5, distance: 12 };
+  if (name === 'torch' || name.endsWith('_torch') || name === 'lantern' || name === 'campfire' || name === 'jack_o_lantern') {
+    return { color: 0xffb45a, intensity: 8, distance: 16 };
+  }
+  return { color: 0xffd08a, intensity: 7, distance: 15 };
+}
+
 // Gemeinsame Uhr für animierte Shader (Wasserwellen).
 const shaderTime = { value: 0 };
 
@@ -275,6 +308,8 @@ function getBlockMaterial(rawBlockName, isGhost = false) {
     const isGlass = cleanName.includes('glass') || cleanName.includes('ice') || cleanName.includes('bars');
     const isWater = cleanName.includes('water');
     const isCross = isCrossPlant(cleanName);
+    const isCutout = isCutoutBlock(cleanName);
+    const isEmissive = isEmissiveBlock(cleanName);
     const isTransparent = isGlass || isWater || cleanName.includes('leaves');
 
     const texFile = resolveTextureFileName(cleanName);
@@ -287,8 +322,11 @@ function getBlockMaterial(rawBlockName, isGhost = false) {
       map: placeholderTex,
       transparent: isTransparent,
       opacity: isGlass || isWater ? 0.65 : 1.0,
-      alphaTest: isCross ? 0.5 : (isTransparent ? 0.1 : 0),
-      side: isCross ? THREE.DoubleSide : THREE.FrontSide
+      alphaTest: (isCross || isCutout) ? 0.5 : (isTransparent ? 0.1 : 0),
+      side: isCross ? THREE.DoubleSide : THREE.FrontSide,
+      emissive: isEmissive ? 0xffffff : 0x000000,
+      emissiveIntensity: isEmissive ? 0.7 : 0.0,
+      emissiveMap: isEmissive ? placeholderTex : null
     });
     if (isWater) applyWaterShader(normalMat);
 
@@ -322,6 +360,7 @@ function getBlockMaterial(rawBlockName, isGhost = false) {
 
       normalMat.map = finalTex;
       normalMat.needsUpdate = true;
+      if (isEmissive) normalMat.emissiveMap = finalTex;
       ghostMat.map = finalTex;
       ghostMat.needsUpdate = true;
 
@@ -350,6 +389,17 @@ scene.add(buildingGroup);
 let allBlocks = [];
 let columnMaxYMap = new Map(); // Speichert für jede (x,z)-Säule die maximale Höhe (für Turm-Erkennung)
 let bounds = { minX: 0, maxX: 0, minY: 0, maxY: 0, minZ: 0, maxZ: 0 };
+
+// Licht-Pool: feste Anzahl Punktlichter, die den nächstgelegenen Fackeln folgen.
+// (Feste Anzahl verhindert Shader-Neukompilierung; inaktive Lichter haben Intensität 0.)
+const LIGHT_POOL_SIZE = 12;
+const lightPool = [];
+for (let i = 0; i < LIGHT_POOL_SIZE; i++) {
+  const pl = new THREE.PointLight(0xffb45a, 0, 15, 2);
+  scene.add(pl);
+  lightPool.push(pl);
+}
+let emitterPositions = []; // { x, y, z, color, intensity, distance }
 
 const boxGeo = new THREE.BoxGeometry(1, 1, 1);
 const edgeGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(1.006, 1.006, 1.006));
@@ -433,16 +483,18 @@ function buildGeometryForModel(name, props) {
   }
   if (name.endsWith('_stairs')) return buildStairsGeometry(props.half, facing);
 
-  if (name.endsWith('_fence_gate')) {
-    const parts = [makeBox(0.22, 1, 0.22, -0.39, 0, 0), makeBox(0.22, 1, 0.22, 0.39, 0, 0)];
-    return rotateForFacing(mergeGeometries(parts), facing);
-  }
-  if (name.endsWith('_fence')) {
-    return mergeGeometries([
-      makeBox(0.25, 1, 0.25, 0, 0, 0),
-      makeBox(1, 0.15, 0.12, 0, 0.31, 0), makeBox(1, 0.15, 0.12, 0, -0.06, 0),
-      makeBox(0.12, 0.15, 1, 0, 0.31, 0), makeBox(0.12, 0.15, 1, 0, -0.06, 0)
-    ]);
+  if (name.endsWith('_fence') || name.endsWith('_fence_gate')) {
+    // Pfosten immer; Querlatten nur in Richtungen mit Verbindung (Bitmaske):
+    // 1 = +X (Ost), 2 = -X (West), 4 = +Z (Süd), 8 = -Z (Nord)
+    const conn = props.conn || 0;
+    const parts = [makeBox(0.25, 1, 0.25, 0, 0, 0)];
+    for (const y of [0.19, -0.12]) {
+      if (conn & 1) parts.push(makeBox(0.5, 0.12, 0.1, 0.25, y, 0));
+      if (conn & 2) parts.push(makeBox(0.5, 0.12, 0.1, -0.25, y, 0));
+      if (conn & 4) parts.push(makeBox(0.1, 0.12, 0.5, 0, y, 0.25));
+      if (conn & 8) parts.push(makeBox(0.1, 0.12, 0.5, 0, y, -0.25));
+    }
+    return mergeGeometries(parts);
   }
   if (name.endsWith('_wall')) {
     return mergeGeometries([
@@ -472,7 +524,7 @@ function buildGeometryForModel(name, props) {
 // Gruppenschlüssel: gleiche Geometrie nur bei gleichen formrelevanten Props.
 function modelKeyOf(name, props) {
   return name + '|' + (props.facing || '') + '|' + (props.half || '') +
-         '|' + (props.type || '') + '|' + (props.open || '');
+         '|' + (props.type || '') + '|' + (props.open || '') + '|' + (props.conn || 0);
 }
 
 function getBlockGeometry(name, props) {
@@ -498,6 +550,7 @@ function setBuildingData(blocksArray) {
   allBlocks = blocksArray;
   columnMaxYMap.clear();
   bounds = { minX: Infinity, maxX: -Infinity, minY: 0, maxY: 0, minZ: Infinity, maxZ: -Infinity };
+  emitterPositions = [];
 
   for (const b of allBlocks) {
     if (b.x < bounds.minX) bounds.minX = b.x;
@@ -509,6 +562,10 @@ function setBuildingData(blocksArray) {
     const colKey = `${b.x},${b.z}`;
     const prevMax = columnMaxYMap.get(colKey) ?? -1;
     if (b.y > prevMax) columnMaxYMap.set(colKey, b.y);
+
+    // Leuchtende Blöcke für den Licht-Pool einsammeln
+    const info = emitterInfo(b.type);
+    if (info) emitterPositions.push({ x: b.x, y: b.y + 0.2, z: b.z, ...info });
   }
 
   layerSlider.max = bounds.maxY;
@@ -683,6 +740,11 @@ function updateBuildingView() {
 
   const groupedVisible = new Map();   // cleanName -> Positionen (für die Materialliste)
   const renderGroups = new Map();     // Model-Key  -> { cleanName, geometry, positions }
+
+  // Belegte Positionen für die Zaun-Verbindungserkennung
+  const occupied = new Set();
+  for (const b of allBlocks) occupied.add(`${b.x},${b.y},${b.z}`);
+
   for (const b of allBlocks) {
     if (b.x < minX || b.x > maxX || b.z < minZ || b.z > maxZ) continue;
     if (mode === 'upTo' && b.y > targetY) continue;
@@ -691,6 +753,16 @@ function updateBuildingView() {
     const { name, props } = parseBlockState(b.type);
     if (!groupedVisible.has(name)) groupedVisible.set(name, []);
     groupedVisible.get(name).push(b);
+
+    // Zäune/Zauntore: Verbindungen zu Nachbarblöcken ermitteln
+    if (name.endsWith('_fence') || name.endsWith('_fence_gate')) {
+      let conn = 0;
+      if (occupied.has(`${b.x + 1},${b.y},${b.z}`)) conn |= 1;
+      if (occupied.has(`${b.x - 1},${b.y},${b.z}`)) conn |= 2;
+      if (occupied.has(`${b.x},${b.y},${b.z + 1}`)) conn |= 4;
+      if (occupied.has(`${b.x},${b.y},${b.z - 1}`)) conn |= 8;
+      props.conn = conn;
+    }
 
     const key = modelKeyOf(name, props);
     if (!renderGroups.has(key)) renderGroups.set(key, { cleanName: name, geometry: getBlockGeometry(name, props), positions: [] });
@@ -836,9 +908,8 @@ function updateSun() {
   dirLight.color.setRGB(1 - night * 0.25, 1 - night * 0.3, 1 - night * 0.1);
   ambient.intensity = 0.18 + day * 0.5;
 
-  const fogColor = NIGHT_FOG.clone().lerp(DAY_FOG, THREE.MathUtils.clamp((elevation + 8) / 60, 0, 1));
-  scene.fog.color.copy(fogColor);
-  scene.background.copy(fogColor);
+  const skyColor = NIGHT_FOG.clone().lerp(DAY_FOG, THREE.MathUtils.clamp((elevation + 8) / 60, 0, 1));
+  scene.background.copy(skyColor);
 
   if (timeVal) {
     timeVal.textContent = `${String(Math.floor(hour)).padStart(2, '0')}:${String(Math.round((hour % 1) * 60)).padStart(2, '0')}`;
@@ -905,6 +976,37 @@ function setDetailModels(enabled) {
   detailModels = enabled;
   geometryCache.clear();
   updateBuildingView();
+}
+
+// Weist die Punktlichter des Pools den der Kamera nächstgelegenen Fackeln zu.
+let lightUpdateTimer = 0;
+function updateTorchLights(delta) {
+  if (shaderQuality === 'off' || emitterPositions.length === 0) {
+    for (const pl of lightPool) pl.intensity = 0;
+    return;
+  }
+  lightUpdateTimer -= delta;
+  if (lightUpdateTimer > 0) return;
+  lightUpdateTimer = 0.25;
+
+  const cam = camera.position;
+  const maxDistSq = 80 * 80;
+  const sorted = emitterPositions
+    .map((e) => ({ e, d: (e.x - cam.x) ** 2 + (e.y - cam.y) ** 2 + (e.z - cam.z) ** 2 }))
+    .sort((a, b) => a.d - b.d);
+
+  for (let i = 0; i < lightPool.length; i++) {
+    const item = sorted[i];
+    const pl = lightPool[i];
+    if (item && item.d < maxDistSq) {
+      pl.position.set(item.e.x, item.e.y, item.e.z);
+      pl.color.setHex(item.e.color);
+      pl.intensity = item.e.intensity;
+      pl.distance = item.e.distance;
+    } else {
+      pl.intensity = 0;
+    }
+  }
 }
 
 if (timeSlider) timeSlider.addEventListener('input', updateSun);
@@ -1203,6 +1305,7 @@ function animate() {
   }
 
   updateHoverHighlight();
+  updateTorchLights(delta);
 
   if (shaderQuality === 'off') renderer.render(scene, camera);
   else composer.render();
