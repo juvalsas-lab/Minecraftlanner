@@ -185,6 +185,24 @@
       <input type="range" id="speedSlider" min="5" max="100" value="20">
     </div>
 
+    <h3>3. Optik / Shader</h3>
+    <div class="control-group">
+      <label>Qualität:</label>
+      <select id="shaderQuality">
+        <option value="off">Aus</option>
+        <option value="medium" selected>Mittel (Schatten, Himmel, Wasser, Bloom)</option>
+        <option value="high">Hoch (+ SSAO)</option>
+      </select>
+    </div>
+    <div class="control-group">
+      <label>Tageszeit: <strong id="timeVal">12:00</strong></label>
+      <input type="range" id="timeSlider" min="0" max="24" step="0.25" value="12">
+    </div>
+    <label class="mat-filter" style="border-bottom: none; margin-bottom: 4px;">
+      <input type="checkbox" id="detailModelsCheck" checked>
+      Detaillierte Blockmodelle (Fackeln, Türen, Slabs …)
+    </label>
+
     <div class="hint">
       <b>Steuerung & Bau-Tricks:</b><br>
       • <b>Taste F</b> (auf Turm): Isoliert exakt diesen Turm!<br>
@@ -221,23 +239,54 @@
   <script type="module">
     import * as THREE from 'three';
     import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+    import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+    import { Sky } from 'three/addons/objects/Sky.js';
+    import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+    import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+    import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+    import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+    import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+    import { SSAOPass } from 'three/addons/postprocessing/SSAOPass.js';
 
     // --- 1. SZENE, KAMERA & RENDERER ---
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x87ceeb);
 
-    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 2000);
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 4000);
     camera.position.set(18, 16, 26);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.0;
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
     document.body.appendChild(renderer.domElement);
 
-    scene.add(new THREE.AmbientLight(0xffffff, 0.78));
-    const dirLight = new THREE.DirectionalLight(0xffffff, 0.75);
+    const ambient = new THREE.AmbientLight(0xffffff, 0.55);
+    scene.add(ambient);
+    const dirLight = new THREE.DirectionalLight(0xffffff, 2.2);
     dirLight.position.set(100, 200, 100);
+    dirLight.castShadow = true;
+    dirLight.shadow.mapSize.set(2048, 2048);
+    dirLight.shadow.bias = -0.0006;
+    dirLight.shadow.normalBias = 0.02;
     scene.add(dirLight);
+    scene.add(dirLight.target);
+
+    // Himmel & Atmosphäre (Sonnenstand wird über die Tageszeit gesteuert)
+    const sky = new Sky();
+    sky.scale.setScalar(1500);
+    scene.add(sky);
+    const skyUniforms = sky.material.uniforms;
+    skyUniforms['turbidity'].value = 8;
+    skyUniforms['rayleigh'].value = 2;
+    skyUniforms['mieCoefficient'].value = 0.005;
+    skyUniforms['mieDirectionalG'].value = 0.8;
+
+    scene.fog = new THREE.Fog(0x87ceeb, 120, 900);
 
     const gridHelper = new THREE.GridHelper(200, 200, 0x444444, 0x222222);
     gridHelper.position.y = -0.5;
@@ -390,15 +439,51 @@
       remoteImg.src = `${REMOTE_TEXTURE_BASE}${texFile}.png`;
     }
 
+    // Gekreuzte Pflanzen (Blumen, Setzlinge, Gras, Feldfrüchte …) werden als
+    // zwei sich kreuzende Ebenen statt als Würfel dargestellt.
+    const CROSS_PLANT_RE = new RegExp(
+      '(_sapling|_flower|tulip|dandelion|poppy|allium|blue_orchid|azure_bluet|' +
+      'oxeye_daisy|cornflower|lily_of_the_valley|torchflower|sunflower|lilac|' +
+      'rose_bush|peony|short_grass|tall_grass|fern|dead_bush|sweet_berry_bush|' +
+      'wither_rose|pink_petals|mushroom|wheat|carrots|potatoes|beetroots|' +
+      'nether_wart|sugar_cane|kelp|seagrass|roots|fungus|sprouts|vines)$'
+    );
+
+    function isCrossPlant(cleanName) {
+      return CROSS_PLANT_RE.test(cleanName);
+    }
+
+    // Gemeinsame Uhr für animierte Shader (Wasserwellen).
+    const shaderTime = { value: 0 };
+
+    function applyWaterShader(mat) {
+      mat.onBeforeCompile = (shader) => {
+        shader.uniforms.uTime = shaderTime;
+        shader.vertexShader = 'uniform float uTime;\n' + shader.vertexShader;
+        shader.vertexShader = shader.vertexShader.replace(
+          '#include <begin_vertex>',
+          `#include <begin_vertex>
+      #ifdef USE_INSTANCING
+        vec2 wp = vec2(instanceMatrix[3][0], instanceMatrix[3][2]);
+      #else
+        vec2 wp = vec2(0.0);
+      #endif
+      float wave = sin((position.x + wp.x) * 2.0 + uTime * 1.8) * 0.05
+                 + sin((position.z + wp.y) * 2.3 - uTime * 1.4) * 0.05;
+      transformed.y += wave;`
+        );
+      };
+      mat.customProgramCacheKey = () => 'waterShaded';
+    }
+
     function getBlockMaterial(rawBlockName, isGhost = false) {
       const cleanName = rawBlockName.replace('minecraft:', '').split('[')[0];
 
       if (!materialCache.has(cleanName)) {
-        const isTransparent =
-          cleanName.includes('glass') || cleanName.includes('leaves') ||
-          cleanName.includes('water') || cleanName.includes('ice') ||
-          cleanName.includes('trapdoor') || cleanName.includes('lantern') ||
-          cleanName.includes('torch') || cleanName.includes('bars');
+        const isGlass = cleanName.includes('glass') || cleanName.includes('ice') || cleanName.includes('bars');
+        const isWater = cleanName.includes('water');
+        const isCross = isCrossPlant(cleanName);
+        const isTransparent = isGlass || isWater || cleanName.includes('leaves');
 
         const texFile = resolveTextureFileName(cleanName);
         const placeholderTex = new THREE.CanvasTexture(createFallbackCanvas());
@@ -409,15 +494,18 @@
         const normalMat = new THREE.MeshLambertMaterial({
           map: placeholderTex,
           transparent: isTransparent,
-          opacity: cleanName.includes('glass') || cleanName.includes('water') ? 0.65 : 1.0,
-          alphaTest: isTransparent ? 0.1 : 0
+          opacity: isGlass || isWater ? 0.65 : 1.0,
+          alphaTest: isCross ? 0.5 : (isTransparent ? 0.1 : 0),
+          side: isCross ? THREE.DoubleSide : THREE.FrontSide
         });
+        if (isWater) applyWaterShader(normalMat);
 
         const ghostMat = new THREE.MeshLambertMaterial({
           map: placeholderTex,
           transparent: true,
           opacity: 0.14,
-          depthWrite: false
+          depthWrite: false,
+          side: isCross ? THREE.DoubleSide : THREE.FrontSide
         });
 
         loadOriginalTextureImage(texFile, (img) => {
@@ -475,6 +563,134 @@
     const edgeGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(1.006, 1.006, 1.006));
     const xrayEdgeMat = new THREE.LineBasicMaterial({ color: 0x55ff55 });
 
+    // --- 5a. BLOCKMODELLE (nicht-würfelige Blöcke) ---
+    let detailModels = true; // Schalter "Detaillierte Blockmodelle"
+    const geometryCache = new Map();
+
+    function makeBox(w, h, d, x = 0, y = 0, z = 0) {
+      const g = new THREE.BoxGeometry(w, h, d);
+      g.translate(x, y, z);
+      return g;
+    }
+
+    // Zwei sich kreuzende Ebenen (Pflanzen, Gras, Blumen …)
+    function makeCrossPlant() {
+      const a = new THREE.PlaneGeometry(1, 1);
+      const b = new THREE.PlaneGeometry(1, 1);
+      b.rotateY(Math.PI / 2);
+      return mergeGeometries([a, b]);
+    }
+
+    // "minecraft:oak_stairs[facing=east,half=bottom]" -> { name, props }
+    function parseBlockState(type) {
+      const raw = type.replace('minecraft:', '');
+      const i = raw.indexOf('[');
+      if (i === -1) return { name: raw, props: {} };
+      const name = raw.slice(0, i);
+      const props = {};
+      const inner = raw.endsWith(']') ? raw.slice(i + 1, -1) : raw.slice(i + 1);
+      inner.split(',').forEach((pair) => {
+        const eq = pair.indexOf('=');
+        if (eq > 0) props[pair.slice(0, eq)] = pair.slice(eq + 1);
+      });
+      return { name, props };
+    }
+
+    // Drehung je Himmelsrichtung (Ausrichtung aus dem Block-State)
+    const FACING_Y = { east: Math.PI / 2, west: -Math.PI / 2, south: Math.PI, north: 0, up: 0, down: 0 };
+
+    function rotateForFacing(geo, facing, flipAxis = false) {
+      let angle = FACING_Y[facing] ?? 0;
+      if (flipAxis) angle += Math.PI / 2;
+      if (angle) geo.rotateY(angle);
+      return geo;
+    }
+
+    function buildStairsGeometry(half, facing) {
+      const parts = [];
+      if (half === 'top') {
+        parts.push(makeBox(1, 0.5, 1, 0, 0.25, 0));
+        parts.push(makeBox(1, 0.5, 0.5, 0, -0.25, -0.25));
+      } else {
+        parts.push(makeBox(1, 0.5, 1, 0, -0.25, 0));
+        parts.push(makeBox(1, 0.5, 0.5, 0, 0.25, -0.25));
+      }
+      return rotateForFacing(mergeGeometries(parts), facing);
+    }
+
+    // Liefert eine Geometrie für einen Blocktyp oder null (= Standard-Würfel).
+    function buildGeometryForModel(name, props) {
+      const facing = props.facing;
+
+      if (isCrossPlant(name)) return makeCrossPlant();
+
+      if (name === 'torch' || (name.endsWith('_torch') && !name.endsWith('_torchflower'))) {
+        const parts = [makeBox(0.14, 0.62, 0.14, 0, -0.19, 0), makeBox(0.25, 0.25, 0.25, 0, 0.16, 0)];
+        const geo = mergeGeometries(parts);
+        return name.includes('wall') ? rotateForFacing(geo, facing, true) : geo;
+      }
+      if (name.endsWith('_door') || name === 'iron_door') {
+        return rotateForFacing(makeBox(1, 1, 0.18, 0, 0, 0), facing);
+      }
+      if (name.endsWith('_trapdoor') || name === 'iron_trapdoor') {
+        return props.open === 'true' ? makeBox(1, 0.18, 1, 0, 0.41, 0) : makeBox(1, 0.18, 1, 0, -0.41, 0);
+      }
+      if (name.endsWith('_slab')) {
+        if (props.type === 'double') return makeBox(1, 1, 1, 0, 0, 0);
+        return makeBox(1, 0.5, 1, 0, props.type === 'top' ? 0.25 : -0.25, 0);
+      }
+      if (name.endsWith('_stairs')) return buildStairsGeometry(props.half, facing);
+
+      if (name.endsWith('_fence_gate')) {
+        const parts = [makeBox(0.22, 1, 0.22, -0.39, 0, 0), makeBox(0.22, 1, 0.22, 0.39, 0, 0)];
+        return rotateForFacing(mergeGeometries(parts), facing);
+      }
+      if (name.endsWith('_fence')) {
+        return mergeGeometries([
+          makeBox(0.25, 1, 0.25, 0, 0, 0),
+          makeBox(1, 0.15, 0.12, 0, 0.31, 0), makeBox(1, 0.15, 0.12, 0, -0.06, 0),
+          makeBox(0.12, 0.15, 1, 0, 0.31, 0), makeBox(0.12, 0.15, 1, 0, -0.06, 0)
+        ]);
+      }
+      if (name.endsWith('_wall')) {
+        return mergeGeometries([
+          makeBox(0.5, 1, 0.5, 0, 0, 0),
+          makeBox(1, 0.3, 0.2, 0, 0.28, 0), makeBox(0.2, 0.3, 1, 0, 0.28, 0)
+        ]);
+      }
+      if (name.endsWith('_pane') || name === 'iron_bars') {
+        return mergeGeometries([makeBox(1, 1, 0.07, 0, 0, 0), makeBox(0.07, 1, 1, 0, 0, 0)]);
+      }
+      if (name.endsWith('_carpet')) return makeBox(1, 0.07, 1, 0, -0.465, 0);
+      if (name === 'snow') return makeBox(1, 0.13, 1, 0, -0.435, 0);
+      if (name.endsWith('_pressure_plate')) return makeBox(0.875, 0.07, 0.875, 0, -0.465, 0);
+      if (name.endsWith('_button')) return makeBox(0.375, 0.2, 0.375, 0, 0, 0);
+      if (name === 'lever') return makeBox(0.5, 0.2, 0.5, 0, 0, 0);
+      if (name === 'ladder') return rotateForFacing(makeBox(1, 1, 0.08, 0, 0, 0), facing);
+      if (name === 'chain') return makeBox(0.16, 1, 0.16, 0, 0, 0);
+      if (name === 'end_rod') return makeBox(0.25, 1, 0.25, 0, 0, 0);
+      if (name.endsWith('lantern')) return makeBox(0.4, 0.5, 0.4, 0, -0.2, 0);
+      if (name === 'lily_pad') return makeBox(1, 0.05, 1, 0, -0.475, 0);
+      if (name === 'redstone_wire' || name === 'tripwire') return makeBox(1, 0.05, 1, 0, -0.475, 0);
+      if (name === 'rail' || name.endsWith('_rail')) return makeBox(1, 0.08, 1, 0, -0.46, 0);
+      if (name === 'vine') return makeBox(1, 1, 0.06, 0, 0, 0);
+      return null;
+    }
+
+    // Gruppenschlüssel: gleiche Geometrie nur bei gleichen formrelevanten Props.
+    function modelKeyOf(name, props) {
+      return name + '|' + (props.facing || '') + '|' + (props.half || '') +
+             '|' + (props.type || '') + '|' + (props.open || '');
+    }
+
+    function getBlockGeometry(name, props) {
+      const key = modelKeyOf(name, props);
+      if (geometryCache.has(key)) return geometryCache.get(key);
+      const geo = (detailModels && buildGeometryForModel(name, props)) || boxGeo;
+      geometryCache.set(key, geo);
+      return geo;
+    }
+
     const layerSlider = document.getElementById('layerSlider');
     const layerVal = document.getElementById('layerVal');
     const layerMode = document.getElementById('layerMode');
@@ -512,7 +728,24 @@
       zMinSlider.min = bounds.minZ; zMinSlider.max = bounds.maxZ; zMinSlider.value = bounds.minZ;
       zMaxSlider.min = bounds.minZ; zMaxSlider.max = bounds.maxZ; zMaxSlider.value = bounds.maxZ;
 
+      updateShadowCamera();
       updateBuildingView();
+    }
+
+    // Passt die Schatten-Kamera der Sonne an die Größe des Gebäudes an.
+    function updateShadowCamera() {
+      const spanX = bounds.maxX - bounds.minX;
+      const spanZ = bounds.maxZ - bounds.minZ;
+      const spanY = bounds.maxY - bounds.minY;
+      const radius = Math.max(spanX, spanZ, spanY) * 0.65 + 10;
+
+      const cam = dirLight.shadow.camera;
+      cam.left = -radius; cam.right = radius;
+      cam.top = radius; cam.bottom = -radius;
+      cam.near = 1;
+      cam.far = 2000;
+      cam.updateProjectionMatrix();
+      updateSun();
     }
 
     function isolateTowerOrSection(targetBlock) {
@@ -647,23 +880,28 @@
 
       updateCropBoxVisual(minX, maxX, minZ, maxZ, areaMaxY);
 
-      const groupedVisible = new Map();
+      const groupedVisible = new Map();   // cleanName -> Positionen (für die Materialliste)
+      const renderGroups = new Map();     // Model-Key  -> { cleanName, geometry, positions }
       for (const b of allBlocks) {
         if (b.x < minX || b.x > maxX || b.z < minZ || b.z > maxZ) continue;
         if (mode === 'upTo' && b.y > targetY) continue;
         if (mode === 'single' && b.y !== targetY) continue;
 
-        const cleanName = b.type.replace('minecraft:', '').split('[')[0];
-        if (!groupedVisible.has(cleanName)) groupedVisible.set(cleanName, []);
-        groupedVisible.get(cleanName).push(b);
+        const { name, props } = parseBlockState(b.type);
+        if (!groupedVisible.has(name)) groupedVisible.set(name, []);
+        groupedVisible.get(name).push(b);
+
+        const key = modelKeyOf(name, props);
+        if (!renderGroups.has(key)) renderGroups.set(key, { cleanName: name, geometry: getBlockGeometry(name, props), positions: [] });
+        renderGroups.get(key).positions.push(b);
       }
 
       const dummy = new THREE.Object3D();
-      for (const [cleanName, positions] of groupedVisible.entries()) {
+      for (const { cleanName, geometry, positions } of renderGroups.values()) {
         const isGhost = activeXrayBlock !== null && activeXrayBlock !== cleanName;
         const mat = getBlockMaterial(cleanName, isGhost);
-        const instancedMesh = new THREE.InstancedMesh(boxGeo, mat, positions.length);
-        
+        const instancedMesh = new THREE.InstancedMesh(geometry, mat, positions.length);
+
         for (let i = 0; i < positions.length; i++) {
           const p = positions[i];
           dummy.position.set(p.x, p.y, p.z);
@@ -678,6 +916,8 @@
         }
         instancedMesh.instanceMatrix.needsUpdate = true;
         instancedMesh.userData.blocks = positions;
+        instancedMesh.castShadow = !mat.transparent && !isCrossPlant(cleanName);
+        instancedMesh.receiveShadow = true;
         buildingGroup.add(instancedMesh);
       }
 
@@ -759,6 +999,118 @@
       flySpeed = parseFloat(e.target.value);
       document.getElementById('speedVal').textContent = flySpeed;
     });
+
+    // --- 5b. SHADER-LOOK: HIMMEL, SONNE, WASSER & POST-PROCESSING ---
+    const sunVec = new THREE.Vector3();
+    const DAY_FOG = new THREE.Color(0x9fc6e8);
+    const NIGHT_FOG = new THREE.Color(0x0a0e1a);
+
+    const timeSlider = document.getElementById('timeSlider');
+    const timeVal = document.getElementById('timeVal');
+    const shaderQualitySelect = document.getElementById('shaderQuality');
+    const detailModelsCheck = document.getElementById('detailModelsCheck');
+
+    let shaderQuality = 'medium';
+
+    // Sonne, Lichtstärke, Nebel und Himmel anhand der Tageszeit aktualisieren
+    function updateSun() {
+      const hour = timeSlider ? parseFloat(timeSlider.value) : 12;
+      const elevation = 90 * Math.sin(((hour - 6) / 12) * Math.PI);
+      const phi = THREE.MathUtils.degToRad(90 - elevation);
+      const theta = THREE.MathUtils.degToRad((hour / 24) * 360 + 90);
+      sunVec.setFromSphericalCoords(1, phi, theta);
+      skyUniforms['sunPosition'].value.copy(sunVec);
+
+      const center = new THREE.Vector3((bounds.minX + bounds.maxX) / 2, 0, (bounds.minZ + bounds.maxZ) / 2);
+      dirLight.target.position.copy(center);
+      dirLight.target.updateMatrixWorld();
+      const span = Math.max(bounds.maxX - bounds.minX, bounds.maxZ - bounds.minZ, bounds.maxY - bounds.minY, 1);
+      const distance = span * 1.6 + 120;
+      dirLight.position.copy(sunVec).multiplyScalar(distance).add(center);
+
+      const day = THREE.MathUtils.clamp(elevation / 90, 0, 1);
+      const night = THREE.MathUtils.clamp(-elevation / 30, 0, 1);
+      dirLight.intensity = 0.15 + day * 2.4;
+      dirLight.color.setRGB(1 - night * 0.25, 1 - night * 0.3, 1 - night * 0.1);
+      ambient.intensity = 0.18 + day * 0.5;
+
+      const fogColor = NIGHT_FOG.clone().lerp(DAY_FOG, THREE.MathUtils.clamp((elevation + 8) / 60, 0, 1));
+      scene.fog.color.copy(fogColor);
+      scene.background.copy(fogColor);
+
+      if (timeVal) {
+        timeVal.textContent = `${String(Math.floor(hour)).padStart(2, '0')}:${String(Math.round((hour % 1) * 60)).padStart(2, '0')}`;
+      }
+    }
+
+    // Post-Processing-Kette
+    const composer = new EffectComposer(renderer);
+    composer.setPixelRatio(renderer.getPixelRatio());
+    composer.setSize(window.innerWidth, window.innerHeight);
+
+    composer.addPass(new RenderPass(scene, camera));
+
+    const ssaoPass = new SSAOPass(scene, camera, window.innerWidth, window.innerHeight);
+    ssaoPass.kernelRadius = 8;
+    ssaoPass.minDistance = 0.005;
+    ssaoPass.maxDistance = 0.1;
+    ssaoPass.enabled = false;
+    composer.addPass(ssaoPass);
+
+    const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.4, 0.5, 0.85);
+    composer.addPass(bloomPass);
+
+    composer.addPass(new OutputPass());
+
+    // Eigenes Farb-Grading (Sättigung, Kontrast, Vignette)
+    const GradeShader = {
+      uniforms: {
+        tDiffuse: { value: null },
+        uSaturation: { value: 1.12 },
+        uContrast: { value: 1.06 },
+        uVignette: { value: 0.35 }
+      },
+      vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+      fragmentShader: [
+        'uniform sampler2D tDiffuse;',
+        'uniform float uSaturation, uContrast, uVignette;',
+        'varying vec2 vUv;',
+        'void main() {',
+        '  vec4 c = texture2D(tDiffuse, vUv);',
+        '  float l = dot(c.rgb, vec3(0.299, 0.587, 0.114));',
+        '  c.rgb = mix(vec3(l), c.rgb, uSaturation);',
+        '  c.rgb = (c.rgb - 0.5) * uContrast + 0.5;',
+        '  float d = distance(vUv, vec2(0.5));',
+        '  c.rgb *= 1.0 - smoothstep(0.45, 0.85, d) * uVignette;',
+        '  gl_FragColor = vec4(clamp(c.rgb, 0.0, 1.0), c.a);',
+        '}'
+      ].join('\n')
+    };
+    const gradePass = new ShaderPass(GradeShader);
+    composer.addPass(gradePass);
+
+    function applyQuality(quality) {
+      shaderQuality = quality;
+      const on = quality !== 'off';
+      dirLight.castShadow = on;
+      bloomPass.enabled = on;
+      gradePass.enabled = on;
+      ssaoPass.enabled = quality === 'high';
+      bloomPass.strength = quality === 'high' ? 0.5 : 0.4;
+    }
+
+    function setDetailModels(enabled) {
+      detailModels = enabled;
+      geometryCache.clear();
+      updateBuildingView();
+    }
+
+    if (timeSlider) timeSlider.addEventListener('input', updateSun);
+    if (shaderQualitySelect) shaderQualitySelect.addEventListener('change', () => applyQuality(shaderQualitySelect.value));
+    if (detailModelsCheck) detailModelsCheck.addEventListener('change', () => setDetailModels(detailModelsCheck.checked));
+
+    updateSun();
+    applyQuality('medium');
 
     // --- 6. NBT & .SCHEM PARSER ---
     function parseNBT(Uint8Buf) {
@@ -1036,6 +1388,7 @@
     function animate() {
       requestAnimationFrame(animate);
       const delta = clock.getDelta();
+      shaderTime.value = clock.getElapsedTime();
 
       if (controls.isLocked) {
         const moveDist = flySpeed * delta;
@@ -1048,7 +1401,9 @@
       }
 
       updateHoverHighlight();
-      renderer.render(scene, camera);
+
+      if (shaderQuality === 'off') renderer.render(scene, camera);
+      else composer.render();
     }
     animate();
 
@@ -1056,6 +1411,7 @@
       camera.aspect = window.innerWidth / window.innerHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(window.innerWidth, window.innerHeight);
+      composer.setSize(window.innerWidth, window.innerHeight);
     });
   </script>
 </body>

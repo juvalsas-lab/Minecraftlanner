@@ -19,6 +19,17 @@ Kein Build, kein Framework – reines HTML/JavaScript mit [three.js](https://thr
   [`misode/mcmeta`](https://github.com/misode/mcmeta) (Zweig `assets`).
 - **Materialliste** rechts: Anzahl pro Blocktyp plus Umrechnung in Stacks (64er).
   Ein Klick auf einen Eintrag aktiviert den **Röntgen-Blick** (X-Ray).
+- **Detaillierte Blockmodelle**: Fackeln, Türen, Treppen, Slabs, Zäune, Scheiben,
+  Pflanzen (gekreuzte Ebenen), Teppiche, Schienen u. a. werden als echte Formen statt
+  als Würfel dargestellt; die Ausrichtung aus dem Block-State (`facing`, `half`, `axis`)
+  wird berücksichtigt. Über die Checkbox abschaltbar (dann wieder Würfel).
+- **Shader-Look** (an Complementary Reimagined angelehnt, als eigene three.js-Shader):
+  - **Schatten** (PCFSoft-Shadow-Mapping) und **Himmel/Atmosphäre** (`Sky`) mit
+    **Tageszeit-Regler** (0–24 h), inkl. passendem Nebel.
+  - **Wasser-Shader**: animierte Wellen (Vertex-Deformation).
+  - **Post-Processing**: Bloom, ACES-Tonemapping, Farb-Grading (Sättigung/Kontrast/Vignette),
+    optional **SSAO**.
+  - **Qualitätsstufen** Aus / Mittel / Hoch.
 - **Höhen-Layer** (Y-Achse): alle Etagen, „bis Layer" (Aufbau) oder „nur aktueller Layer".
 - **Turm-Isolierung** (`F`): erkennt automatisch zusammenhängende Türme/Bereiche und
   schneidet die Ansicht darauf zu; mit `+`/`-` vergrößer-/verkleinerbar.
@@ -57,6 +68,19 @@ Für den Test: links unter „.schem / .schematic Datei einfügen" die Datei `sc
 | `R` | Gesamtes Gebäude wieder anzeigen |
 | `X` | Röntgen-Blick beenden |
 | Klick auf Material (rechts) | Röntgen-Blick für diesen Blocktyp an/aus |
+
+## Optik / Shader
+
+Der Optik-Bereich im linken Panel (Abschnitt „3. Optik / Shader") steuert:
+
+- **Qualität**: `Aus` (keine Effekte), `Mittel` (Schatten, Himmel, Wasser, Bloom),
+  `Hoch` (zusätzlich SSAO – rechenintensiver).
+- **Tageszeit**: verschiebt Sonne/Mond, Lichtstärke, Himmelsfarbe und Nebel.
+- **Detaillierte Blockmodelle**: echte Formen für Fackeln, Türen, Slabs, Treppen usw.
+
+> **Hinweis:** Es wird **nicht** das OptiFine-/Iris-Shaderpack „Complementary Reimagined"
+> eingebunden (das läuft nur in Minecraft Java und ist nicht mit WebGL/three.js
+> kompatibel). Stattdessen sind die Effekte mit eigenen three.js-Shadern nachgebaut.
 
 ## Projektstruktur
 
