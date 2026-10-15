@@ -1,6 +1,18 @@
 import * as THREE from 'three';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 
+// Lädt die generierten Original-Texturnamen (Block-ID -> Texturdatei), falls sie
+// nicht bereits über ein <script src="blocktextures.js"> im Dokument geladen sind.
+if (typeof document !== 'undefined' && !globalThis.BLOCK_TEXTURES) {
+  await new Promise((resolve) => {
+    const script = document.createElement('script');
+    script.src = 'blocktextures.js';
+    script.onload = resolve;
+    script.onerror = resolve; // Ohne Map greift weiterhin die Heuristik.
+    document.head.appendChild(script);
+  });
+}
+
 // --- 1. SZENE, KAMERA & RENDERER ---
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x87ceeb);
@@ -104,7 +116,16 @@ const ghostMaterialCache = new Map();
 const iconUrlCache = new Map();
 const REMOTE_TEXTURE_BASE = 'https://raw.githubusercontent.com/misode/mcmeta/assets/assets/minecraft/textures/block/';
 
+// Original-Texturname je Block, generiert aus den echten Minecraft-Daten
+// (siehe tools/generate-blocktextures.py, geladen über blocktextures.js).
+const BLOCK_TEXTURES = (typeof globalThis !== 'undefined' && globalThis.BLOCK_TEXTURES) || {};
+
 function resolveTextureFileName(cleanName) {
+  if (BLOCK_TEXTURES[cleanName]) return BLOCK_TEXTURES[cleanName];
+  return guessTextureFileName(cleanName);
+}
+
+function guessTextureFileName(cleanName) {
   const exactMap = {
     grass_block: 'grass_block_side', dirt_path: 'dirt_path_side', podzol: 'podzol_side',
     mycelium: 'mycelium_side', snow_block: 'snow', quartz_block: 'quartz_block_side',

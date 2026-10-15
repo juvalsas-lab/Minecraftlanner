@@ -212,6 +212,9 @@
     <div id="materialList"></div>
   </div>
 
+  <!-- Original-Texturnamen je Block (generiert) -->
+  <script src="blocktextures.js"></script>
+
   <!-- KOMPLETTER 3D-CODE DIREKT EINGEBAUT -->
   <script type="module">
     import * as THREE from 'three';
@@ -316,7 +319,16 @@
     const iconUrlCache = new Map();
     const REMOTE_TEXTURE_BASE = 'https://raw.githubusercontent.com/misode/mcmeta/assets/assets/minecraft/textures/block/';
 
+    // Original-Texturname je Block, generiert aus den echten Minecraft-Daten
+    // (siehe tools/generate-blocktextures.py, geladen über blocktextures.js).
+    const BLOCK_TEXTURES = (typeof globalThis !== 'undefined' && globalThis.BLOCK_TEXTURES) || {};
+
     function resolveTextureFileName(cleanName) {
+      if (BLOCK_TEXTURES[cleanName]) return BLOCK_TEXTURES[cleanName];
+      return guessTextureFileName(cleanName);
+    }
+
+    function guessTextureFileName(cleanName) {
       const exactMap = {
         grass_block: 'grass_block_side', dirt_path: 'dirt_path_side', podzol: 'podzol_side',
         mycelium: 'mycelium_side', snow_block: 'snow', quartz_block: 'quartz_block_side',
