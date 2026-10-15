@@ -38,8 +38,10 @@ Kein Build, kein Framework – reines HTML/JavaScript mit [three.js](https://thr
 - **Höhen-Layer** (Y-Achse): alle Etagen, „bis Layer" (Aufbau) oder „nur aktueller Layer".
 - **Turm-Isolierung** (`F`): erkennt automatisch zusammenhängende Türme/Bereiche und
   schneidet die Ansicht darauf zu; mit `+`/`-` vergrößer-/verkleinerbar.
+- **Startbauwerk**: Beim Laden wird automatisch das in `START_SCHEMATIC` angegebene
+  Bauwerk (Standard `schem/start.schematic`) angezeigt; die Kamera wird darauf
+  ausgerichtet. Über die Konstante leicht änderbar.
 - **Flug-Steuerung** per Pointer-Lock (WASD, Space/Shift).
-- **Demo-Burg** beim Start, damit ohne Datei sofort etwas zu sehen ist.
 
 ## Schnellstart
 
@@ -51,8 +53,13 @@ python3 -m http.server 8000
 
 Dann im Browser öffnen: <http://localhost:8000/>
 
-Für den Test: links unter „.schem / .schematic Datei einfügen" die Datei `schem/test.schem`
-(modernes Format) oder `schem/test.schematic` (Legacy-Format) wählen.
+Beim Start wird automatisch `schem/start.schematic` geladen und angezeigt.
+Zum Ausprobieren anderer Dateien links unter „.schem / .schematic Datei einfügen"
+z. B. `schem/test.schem` (modernes Format) oder `schem/test.schematic` (Legacy) wählen.
+
+Das Startbauwerk ist über die Konstante `START_SCHEMATIC` (oben in `main.js` bzw. im
+Inline-Skript von `index.html`) einstellbar – einfach eine eigene Datei nach `schem/`
+legen und den Pfad anpassen.
 
 > **Hinweis:** Der Viewer benötigt eine Internetverbindung. three.js und pako werden von
 > CDNs geladen, die Block-Texturen von GitHub. Ohne Verbindung bleibt die 3D-Ansicht leer
@@ -100,6 +107,7 @@ tools/generate-blockmodels.mjs     Generator für blockmodels.js (Node)
 tools/generate-test-schematic.mjs  Generator für schem/test.schematic
 schem/test.schem               kleine Testvorlage (Sponge-Format)
 schem/test.schematic           kleine Testvorlage (klassisches Legacy-Format)
+schem/start.schematic          beim Start geladenes Bauwerk (St. Paul's Cathedral)
 ```
 
 ## Texturen

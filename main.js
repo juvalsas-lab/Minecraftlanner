@@ -35,6 +35,9 @@ if (typeof document !== 'undefined' && !globalThis.BLOCK_MODELS) {
   await loadScript('blockmodels.js');
 }
 
+// Bauwerk, das beim Start automatisch geladen wird (leer lassen für keine Startladung).
+const START_SCHEMATIC = 'schem/start.schematic';
+
 // --- 1. SZENE, KAMERA & RENDERER ---
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x87ceeb);
@@ -73,7 +76,7 @@ skyUniforms['rayleigh'].value = 2;
 skyUniforms['mieCoefficient'].value = 0.005;
 skyUniforms['mieDirectionalG'].value = 0.8;
 
-const gridHelper = new THREE.GridHelper(200, 200, 0x444444, 0x222222);
+let gridHelper = new THREE.GridHelper(200, 200, 0x444444, 0x222222);
 gridHelper.position.y = -0.5;
 scene.add(gridHelper);
 
@@ -883,7 +886,47 @@ function setBuildingData(blocksArray) {
   zMaxSlider.min = bounds.minZ; zMaxSlider.max = bounds.maxZ; zMaxSlider.value = bounds.maxZ;
 
   updateShadowCamera();
+  updateGridToBounds();
   updateBuildingView();
+  frameCameraToBounds();
+}
+
+// Passt das Bodenraster an die Größe des Bauwerks an.
+function updateGridToBounds() {
+  const size = Math.max(bounds.maxX - bounds.minX, bounds.maxZ - bounds.minZ) + 20;
+  const divisions = Math.max(20, Math.round(size / 2));
+  scene.remove(gridHelper);
+  gridHelper.geometry.dispose();
+  gridHelper.material.dispose();
+  const next = new THREE.GridHelper(size, divisions, 0x444444, 0x222222);
+  next.position.y = -0.5;
+  scene.add(next);
+  gridHelper = next;
+}
+
+// Richtet die Kamera auf die Mitte des Bauwerks aus (Abstand aus der Größe).
+function frameCameraToBounds() {
+  const size = Math.max(
+    bounds.maxX - bounds.minX,
+    bounds.maxZ - bounds.minZ,
+    bounds.maxY - bounds.minY
+  );
+  const cx = (bounds.minX + bounds.maxX) / 2;
+  const cy = (bounds.minY + bounds.maxY) / 2;
+  const cz = (bounds.minZ + bounds.maxZ) / 2;
+  const distance = size * 1.1 + 20;
+
+  camera.position.set(cx + distance, cy + size * 0.55, cz + distance);
+  camera.lookAt(cx, cy, cz);
+
+  flySpeed = Math.max(20, Math.round(size / 3));
+  const speedSlider = document.getElementById('speedSlider');
+  if (speedSlider) {
+    speedSlider.max = Math.max(100, flySpeed * 3);
+    speedSlider.value = flySpeed;
+  }
+  const speedValEl = document.getElementById('speedVal');
+  if (speedValEl) speedValEl.textContent = flySpeed;
 }
 
 // Passt die Schatten-Kamera der Sonne an die Größe des Gebäudes an.
@@ -1493,101 +1536,68 @@ function decodeLegacySchematic(schem) {
   return decodedBlocks;
 }
 
+// Parst ein Schematic (modernes Sponge-.schem oder klassisches .schematic).
+function loadSchematicFromArrayBuffer(arrayBuffer) {
+  const raw = new Uint8Array(arrayBuffer);
+
+  // Standard ist gzip-komprimiert; unkomprimierte Dateien als Fallback zulassen.
+  let inflated = raw;
+  try {
+    inflated = window.pako.ungzip(raw);
+  } catch (_) {
+    inflated = raw;
+  }
+
+  const nbt = parseNBT(inflated);
+  const schem = nbt.Schematic ? nbt.Schematic : nbt;
+
+  const paletteObj = schem.Palette || (schem.Blocks && schem.Blocks.Palette);
+  const blockData = schem.BlockData || (schem.Blocks && schem.Blocks.Data);
+  const legacyBlocks = ArrayBuffer.isView(schem.Blocks) ? schem.Blocks : null;
+
+  let decodedBlocks;
+  if (paletteObj && blockData) {
+    // Modernes Sponge-.schem: Palette + varint-kodierte BlockData
+    decodedBlocks = decodeSpongeSchematic(schem, paletteObj, blockData);
+  } else if (legacyBlocks && schem.Width && schem.Height && schem.Length) {
+    // Klassisches .schematic: numerische Legacy-IDs
+    decodedBlocks = decodeLegacySchematic(schem);
+  } else {
+    throw new Error('Format nicht erkannt. Bitte nutze eine .schem oder .schematic Datei.');
+  }
+
+  setBuildingData(decodedBlocks);
+}
+
 document.getElementById('fileInput').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
-
   try {
-    const arrayBuffer = await file.arrayBuffer();
-    const raw = new Uint8Array(arrayBuffer);
-
-    // Standard ist gzip-komprimiert; unkomprimierte Dateien als Fallback zulassen.
-    let inflated = raw;
-    try {
-      inflated = window.pako.ungzip(raw);
-    } catch (_) {
-      inflated = raw;
-    }
-
-    const nbt = parseNBT(inflated);
-    const schem = nbt.Schematic ? nbt.Schematic : nbt;
-
-    const paletteObj = schem.Palette || (schem.Blocks && schem.Blocks.Palette);
-    const blockData = schem.BlockData || (schem.Blocks && schem.Blocks.Data);
-    const legacyBlocks = ArrayBuffer.isView(schem.Blocks) ? schem.Blocks : null;
-
-    let decodedBlocks;
-    if (paletteObj && blockData) {
-      // Modernes Sponge-.schem: Palette + varint-kodierte BlockData
-      decodedBlocks = decodeSpongeSchematic(schem, paletteObj, blockData);
-    } else if (legacyBlocks && schem.Width && schem.Height && schem.Length) {
-      // Klassisches .schematic: numerische Legacy-IDs
-      decodedBlocks = decodeLegacySchematic(schem);
-    } else {
-      alert('Format nicht erkannt. Bitte nutze eine .schem oder .schematic Datei.');
-      return;
-    }
-
-    setBuildingData(decodedBlocks);
+    loadSchematicFromArrayBuffer(await file.arrayBuffer());
   } catch (err) {
     console.error(err);
     alert('Fehler beim Laden der Datei: ' + err.message);
   }
 });
 
-// --- 7. DEMO-BURG MIT 4 ECKTÜRMEN BEIM START ---
-function createDemoCastle() {
-  const blocks = [];
-  const added = new Set();
-  function addBlock(x, y, z, type) {
-    const key = `${x},${y},${z}`;
-    if (!added.has(key)) {
-      added.add(key);
-      blocks.push({ x, y, z, type });
+// --- 7. START-BAUWERK ---
+// Lädt beim Start automatisch das in START_SCHEMATIC angegebene Bauwerk.
+async function loadStartSchematic() {
+  if (!START_SCHEMATIC) return;
+  try {
+    const res = await fetch(START_SCHEMATIC, { cache: 'no-cache' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    loadSchematicFromArrayBuffer(await res.arrayBuffer());
+  } catch (err) {
+    console.error('Startbauwerk konnte nicht geladen werden:', err);
+    const el = document.getElementById('hoverInfo');
+    if (el) {
+      el.style.display = 'block';
+      el.textContent = `⚠️ Startbauwerk "${START_SCHEMATIC}" nicht gefunden – bitte links eine Datei einfügen.`;
     }
   }
-
-  for (let x = -10; x <= 10; x++) {
-    for (let z = -10; z <= 10; z++) {
-      addBlock(x, 0, z, 'cobblestone');
-      if (Math.abs(x) === 7 || Math.abs(z) === 7) {
-        if (Math.abs(x) <= 7 && Math.abs(z) <= 7) {
-          if (z === 7 && Math.abs(x) <= 1) continue;
-          for (let y = 1; y <= 5; y++) addBlock(x, y, z, 'stone_bricks');
-          if ((x + z) % 2 === 0) addBlock(x, 6, z, 'stone_bricks');
-        }
-      }
-    }
-  }
-
-  const corners = [[-7, -7], [7, -7], [-7, 7], [7, 7]];
-  for (const [cx, cz] of corners) {
-    for (let tx = cx - 2; tx <= cx + 2; tx++) {
-      for (let tz = cz - 2; tz <= cz + 2; tz++) {
-        const isWall = Math.abs(tx - cx) === 2 || Math.abs(tz - cz) === 2;
-        if (isWall) {
-          for (let y = 1; y <= 10; y++) {
-            const isCorner = Math.abs(tx - cx) === 2 && Math.abs(tz - cz) === 2;
-            const isWindow = (y === 5 || y === 8) && (tx === cx || tz === cz);
-            addBlock(tx, y, tz, isCorner ? 'deepslate_bricks' : (isWindow ? 'glass' : 'stone_bricks'));
-          }
-        }
-        addBlock(tx, 10, tz, 'spruce_planks');
-        if (isWall && (tx + tz) % 2 === 0) addBlock(tx, 11, tz, 'bricks');
-      }
-    }
-    for (let step = 0; step <= 2; step++) {
-      for (let tx = cx - 2 + step; tx <= cx + 2 - step; tx++) {
-        for (let tz = cz - 2 + step; tz <= cz + 2 - step; tz++) {
-          addBlock(tx, 11 + step, tz, 'bricks');
-        }
-      }
-    }
-  }
-
-  setBuildingData(blocks);
 }
-createDemoCastle();
+loadStartSchematic();
 
 // --- 8. RAYCASTER (HOVER-UMRANDUNG) & RENDER-LOOP ---
 const raycaster = new THREE.Raycaster();
