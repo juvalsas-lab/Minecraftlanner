@@ -36,7 +36,7 @@ if (typeof document !== 'undefined' && !globalThis.BLOCK_MODELS) {
 }
 
 // Bauwerk, das beim Start automatisch geladen wird (leer lassen für keine Startladung).
-const START_SCHEMATIC = 'schem/start.schematic';
+const START_SCHEMATIC = 'schem/start.schem';
 
 // --- 1. SZENE, KAMERA & RENDERER ---
 const scene = new THREE.Scene();
