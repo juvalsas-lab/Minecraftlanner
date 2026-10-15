@@ -30,6 +30,11 @@ if (typeof document !== 'undefined' && !globalThis.LEGACY_BLOCKS) {
   await loadScript('legacyblocks.js');
 }
 
+// Lädt die echten Blockmodelle (Geometrie + UVs + Flächen-Texturen).
+if (typeof document !== 'undefined' && !globalThis.BLOCK_MODELS) {
+  await loadScript('blockmodels.js');
+}
+
 // --- 1. SZENE, KAMERA & RENDERER ---
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x87ceeb);
@@ -535,6 +540,306 @@ function getBlockGeometry(name, props) {
   return geo;
 }
 
+// --- 5b. MODELLGETRIEBENE BLÖCKE (aus blockmodels.js) ---
+const BLOCK_MODELS = (typeof globalThis !== 'undefined' && globalThis.BLOCK_MODELS) || {};
+const BLOCK_MODEL_POOL = (typeof globalThis !== 'undefined' && globalThis.BLOCK_MODEL_POOL) || [];
+
+const FACE_DIRS = ['down', 'up', 'north', 'south', 'west', 'east'];
+const FACE_NORMAL = {
+  north: [0, 0, -1], south: [0, 0, 1], west: [-1, 0, 0],
+  east: [1, 0, 0], up: [0, 1, 0], down: [0, -1, 0]
+};
+
+const span1 = (a, b) => (b - a === 0 ? 1 : b - a);
+
+function faceUVCoords(d, x1, y1, z1, x2, y2, z2, x, y, z) {
+  switch (d) {
+    case 'north': return [(x2 - x) / span1(x1, x2), (y2 - y) / span1(y1, y2)];
+    case 'south': return [(x - x1) / span1(x1, x2), (y2 - y) / span1(y1, y2)];
+    case 'west': return [(z - z1) / span1(z1, z2), (y2 - y) / span1(y1, y2)];
+    case 'east': return [(z2 - z) / span1(z1, z2), (y2 - y) / span1(y1, y2)];
+    case 'up': return [(x - x1) / span1(x1, x2), (z - z1) / span1(z1, z2)];
+    case 'down': return [(x - x1) / span1(x1, x2), (z2 - z) / span1(z1, z2)];
+    default: return [0, 0];
+  }
+}
+
+function faceCorners(d, x1, y1, z1, x2, y2, z2) {
+  switch (d) {
+    case 'north': return [[x1, y1, z1], [x2, y1, z1], [x2, y2, z1], [x1, y2, z1]];
+    case 'south': return [[x1, y1, z2], [x2, y1, z2], [x2, y2, z2], [x1, y2, z2]];
+    case 'west': return [[x1, y1, z1], [x1, y1, z2], [x1, y2, z2], [x1, y2, z1]];
+    case 'east': return [[x2, y1, z1], [x2, y1, z2], [x2, y2, z2], [x2, y2, z1]];
+    case 'up': return [[x1, y2, z1], [x2, y2, z1], [x2, y2, z2], [x1, y2, z2]];
+    case 'down': return [[x1, y1, z1], [x2, y1, z1], [x2, y1, z2], [x1, y1, z2]];
+    default: return null;
+  }
+}
+
+function autoUV(d, x1, y1, z1, x2, y2, z2) {
+  switch (d) {
+    case 'down': return [x1, z1, x2, z2];
+    case 'up': return [x1, 16 - z2, x2, 16 - z1];
+    case 'north': return [16 - x2, 16 - y2, 16 - x1, 16 - y1];
+    case 'south': return [x1, 16 - y2, x2, 16 - y1];
+    case 'west': return [z1, 16 - y2, z2, 16 - y1];
+    case 'east': return [16 - z2, 16 - y2, 16 - z1, 16 - y1];
+    default: return [0, 0, 16, 16];
+  }
+}
+
+function triNormal(a, b, c) {
+  const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
+  const vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+  return [uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx];
+}
+
+function rotatePoint(p, origin, axis, angleDeg, rescale) {
+  let [x, y, z] = p;
+  const a = angleDeg * Math.PI / 180;
+  if (rescale) {
+    const f = 1 / Math.abs(Math.cos(a));
+    if (axis !== 'x') x = origin[0] + (x - origin[0]) * f;
+    if (axis !== 'y') y = origin[1] + (y - origin[1]) * f;
+    if (axis !== 'z') z = origin[2] + (z - origin[2]) * f;
+  }
+  const dx = x - origin[0], dy = y - origin[1], dz = z - origin[2];
+  const c = Math.cos(a), s = Math.sin(a);
+  let rx = dx, ry = dy, rz = dz;
+  if (axis === 'x') { ry = dy * c - dz * s; rz = dy * s + dz * c; }
+  else if (axis === 'y') { rx = dx * c + dz * s; rz = -dx * s + dz * c; }
+  else { rx = dx * c - dy * s; ry = dx * s + dy * c; }
+  return [origin[0] + rx, origin[1] + ry, origin[2] + rz];
+}
+
+function rotateFaceUV(u, v, rect, deg) {
+  const cx = (rect[0] + rect[2]) / 2, cy = (rect[1] + rect[3]) / 2;
+  const du = u - cx, dv = v - cy;
+  const a = deg * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);
+  return [cx + (du * c - dv * s), cy + (du * s + dv * c)];
+}
+
+function textureKind(tx) {
+  const n = tx;
+  if (n.includes('water')) return { water: true, transparent: true };
+  if (/glass|_bars$|^ice$|ice_|_pane/.test(n)) return { transparent: true };
+  if (/leaves|vine|lily_pad|roots|fungus|sprouts|_crop|wheat|carrots|potatoes|beetroots|nether_wart|kelp|seagrass|sapling|flower|tulip|dandelion|poppy|allium|orchid|bluet|daisy|cornflower|lily|rose_bush|peony|sunflower|lilac|short_grass|tall_grass|fern|dead_bush|bush|sugar_cane|torch|lantern|chain|rail|ladder|tripwire|redstone_wire/.test(n)) return { cutout: true };
+  return {};
+}
+
+function tintColorFor(tx) {
+  if (/grass_block_top|grass_block_side_overlay/.test(tx)) return 0x91bd59;
+  if (/short_grass|tall_grass|fern|sugar_cane/.test(tx)) return 0x91bd59;
+  if (/leaves|vine|lily_pad/.test(tx)) return 0x59ae30;
+  if (/water/.test(tx)) return 0x3f76e4;
+  return 0xffffff;
+}
+
+function isEmissiveTexture(tx) {
+  return /torch|lantern|glowstone|sea_lantern|shroomlight|magma|^lava|end_rod|jack_o_lantern|redstone_lamp_on|campfire_fire|froglight|crying_obsidian|respawn_anchor|beacon|conduit|sculk_catalyst/.test(tx);
+}
+
+const texMaterialCache = new Map();
+const ghostTexMaterialCache = new Map();
+
+function buildTextureMaterial(tx, tint) {
+  const kind = textureKind(tx);
+  const placeholderTex = new THREE.CanvasTexture(createFallbackCanvas());
+  placeholderTex.magFilter = THREE.NearestFilter;
+  placeholderTex.minFilter = THREE.NearestFilter;
+  placeholderTex.colorSpace = THREE.SRGBColorSpace;
+
+  const emissive = isEmissiveTexture(tx);
+  const mat = new THREE.MeshLambertMaterial({
+    map: placeholderTex,
+    color: tint,
+    transparent: !!kind.transparent,
+    opacity: kind.transparent ? 0.65 : 1.0,
+    alphaTest: kind.cutout ? 0.5 : (kind.transparent ? 0.1 : 0),
+    emissive: emissive ? 0xffffff : 0x000000,
+    emissiveIntensity: emissive ? 0.7 : 0.0,
+    emissiveMap: emissive ? placeholderTex : null
+  });
+  if (kind.water) applyWaterShader(mat);
+
+  loadOriginalTextureImage(tx, (img) => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 16; canvas.height = 16;
+    canvas.getContext('2d').drawImage(img, 0, 0, 16, 16, 0, 0, 16, 16);
+    const finalTex = new THREE.CanvasTexture(canvas);
+    finalTex.magFilter = THREE.NearestFilter;
+    finalTex.minFilter = THREE.NearestFilter;
+    finalTex.colorSpace = THREE.SRGBColorSpace;
+    mat.map = finalTex;
+    mat.needsUpdate = true;
+    if (emissive) mat.emissiveMap = finalTex;
+  });
+  return mat;
+}
+
+function getTextureMaterial(tx, tint) {
+  const key = tx + '|' + tint;
+  if (!texMaterialCache.has(key)) texMaterialCache.set(key, buildTextureMaterial(tx, tint));
+  return texMaterialCache.get(key);
+}
+
+function getGhostTextureMaterial(tx) {
+  if (!ghostTexMaterialCache.has(tx)) {
+    const placeholderTex = new THREE.CanvasTexture(createFallbackCanvas());
+    placeholderTex.colorSpace = THREE.SRGBColorSpace;
+    const mat = new THREE.MeshLambertMaterial({ map: placeholderTex, transparent: true, opacity: 0.14, depthWrite: false });
+    loadOriginalTextureImage(tx, (img) => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 16; canvas.height = 16;
+      canvas.getContext('2d').drawImage(img, 0, 0, 16, 16, 0, 0, 16, 16);
+      mat.map = new THREE.CanvasTexture(canvas);
+      mat.map.magFilter = THREE.NearestFilter;
+      mat.map.minFilter = THREE.NearestFilter;
+      mat.map.colorSpace = THREE.SRGBColorSpace;
+      mat.map.needsUpdate = true;
+      mat.needsUpdate = true;
+    });
+    ghostTexMaterialCache.set(tx, mat);
+  }
+  return ghostTexMaterialCache.get(tx);
+}
+
+// Baut Geometrie (mit Flächengruppen je Textur) aus einem Modell der Pool-Tabelle.
+const modelGeomCache = new Map();
+function buildModelGeometry(modelId) {
+  if (modelGeomCache.has(modelId)) return modelGeomCache.get(modelId);
+  const model = BLOCK_MODEL_POOL[modelId];
+  const buckets = new Map(); // matKey -> { tx, tint, pos, norm, uv, idx }
+  const order = [];
+
+  const addVerts = (mats, verts, normal) => {
+    const base = mats.pos.length / 3;
+    for (const v of verts) mats.pos.push(v.p[0] / 16 - 0.5, v.p[1] / 16 - 0.5, v.p[2] / 16 - 0.5);
+    for (let i = 0; i < 4; i++) mats.norm.push(normal[0], normal[1], normal[2]);
+    for (const v of verts) mats.uv.push(v.uv[0], v.uv[1]);
+    mats.idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  };
+
+  for (const el of (model.e || [])) {
+    const [X1, Y1, Z1] = el.f, [X2, Y2, Z2] = el.t;
+    for (const d of FACE_DIRS) {
+      const face = el.fa[d];
+      if (!face) continue;
+      const tint = face.ti !== undefined ? tintColorFor(face.tx) : 0xffffff;
+      const matKey = face.tx + '|' + tint;
+      let mats = buckets.get(matKey);
+      if (!mats) { mats = { tx: face.tx, tint, pos: [], norm: [], uv: [], idx: [] }; buckets.set(matKey, mats); order.push(mats); }
+
+      const rect = face.u || autoUV(d, X1, Y1, Z1, X2, Y2, Z2);
+      const corners = faceCorners(d, X1, Y1, Z1, X2, Y2, Z2);
+      const verts = corners.map((c) => {
+        const [fu, fv] = faceUVCoords(d, X1, Y1, Z1, X2, Y2, Z2, c[0], c[1], c[2]);
+        let u = rect[0] + fu * (rect[2] - rect[0]);
+        let v = rect[1] + fv * (rect[3] - rect[1]);
+        if (face.fr) [u, v] = rotateFaceUV(u, v, rect, face.fr);
+        return { p: c.slice(), uv: [u / 16, 1 - v / 16] };
+      });
+
+      let nrm = triNormal(verts[0].p, verts[1].p, verts[2].p);
+      if (nrm[0] * FACE_NORMAL[d][0] + nrm[1] * FACE_NORMAL[d][1] + nrm[2] * FACE_NORMAL[d][2] < 0) {
+        const tmp = verts[1]; verts[1] = verts[3]; verts[3] = tmp;
+        nrm = triNormal(verts[0].p, verts[1].p, verts[2].p);
+      }
+
+      let normal = FACE_NORMAL[d];
+      if (el.r) {
+        for (const v of verts) v.p = rotatePoint(v.p, el.r.o, el.r.a, el.r.g, el.r.s);
+        normal = rotatePoint(normal, [0, 0, 0], el.r.a, el.r.g, false);
+      }
+      addVerts(mats, verts, normal);
+    }
+  }
+
+  // Zustandsrotation (rx/ry) um den Blockmittelpunkt (8,8,8)
+  const center = [8, 8, 8];
+  if (model.rx) {
+    for (const m of order) {
+      for (let i = 0; i < m.pos.length; i += 3) {
+        let p = [m.pos[i] * 16 + 8, m.pos[i + 1] * 16 + 8, m.pos[i + 2] * 16 + 8];
+        p = rotatePoint(p, center, 'x', model.rx, false);
+        m.pos[i] = p[0] / 16 - 0.5; m.pos[i + 1] = p[1] / 16 - 0.5; m.pos[i + 2] = p[2] / 16 - 0.5;
+      }
+      for (let i = 0; i < m.norm.length; i += 3) {
+        const n = rotatePoint([m.norm[i], m.norm[i + 1], m.norm[i + 2]], [0, 0, 0], 'x', model.rx, false);
+        m.norm[i] = n[0]; m.norm[i + 1] = n[1]; m.norm[i + 2] = n[2];
+      }
+    }
+  }
+  if (model.ry) {
+    for (const m of order) {
+      for (let i = 0; i < m.pos.length; i += 3) {
+        let p = [m.pos[i] * 16 + 8, m.pos[i + 1] * 16 + 8, m.pos[i + 2] * 16 + 8];
+        p = rotatePoint(p, center, 'y', model.ry, false);
+        m.pos[i] = p[0] / 16 - 0.5; m.pos[i + 1] = p[1] / 16 - 0.5; m.pos[i + 2] = p[2] / 16 - 0.5;
+      }
+      for (let i = 0; i < m.norm.length; i += 3) {
+        const n = rotatePoint([m.norm[i], m.norm[i + 1], m.norm[i + 2]], [0, 0, 0], 'y', model.ry, false);
+        m.norm[i] = n[0]; m.norm[i + 1] = n[1]; m.norm[i + 2] = n[2];
+      }
+    }
+  }
+
+  const pos = [], norm = [], uv = [], idx = [];
+  const groups = [];
+  let vOffset = 0;
+  order.forEach((m, i) => {
+    const start = idx.length;
+    for (let k = 0; k < m.pos.length; k++) pos.push(m.pos[k]);
+    for (let k = 0; k < m.norm.length; k++) norm.push(m.norm[k]);
+    for (let k = 0; k < m.uv.length; k++) uv.push(m.uv[k]);
+    for (const index of m.idx) idx.push(index + vOffset);
+    groups.push({ start, count: idx.length - start, tx: m.tx, tint: m.tint });
+    vOffset += m.pos.length / 3;
+  });
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geometry.setAttribute('normal', new THREE.Float32BufferAttribute(norm, 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  geometry.setIndex(idx);
+  groups.forEach((g, i) => geometry.addGroup(g.start, g.count, i));
+
+  const result = { geometry, groups };
+  modelGeomCache.set(modelId, result);
+  return result;
+}
+
+// Wählt das Modell passend zum Blockzustand (exakt, sonst Teilmengen-Match).
+function lookupModel(name, props) {
+  const table = BLOCK_MODELS[name];
+  if (!table) return undefined;
+  const own = {};
+  for (const k of Object.keys(props)) if (k !== 'conn' && k !== 'waterlogged') own[k] = props[k];
+
+  const exact = Object.keys(own).sort().map((k) => `${k}=${own[k]}`).join(',');
+  if (table[exact] !== undefined) return table[exact];
+
+  let best, bestCount = -1;
+  for (const key of Object.keys(table)) {
+    if (key === '') continue;
+    let ok = true, count = 0;
+    for (const p of key.split(',')) {
+      const eq = p.indexOf('=');
+      if (own[p.slice(0, eq)] !== p.slice(eq + 1)) { ok = false; break; }
+      count++;
+    }
+    if (ok && count > bestCount) { bestCount = count; best = table[key]; }
+  }
+  if (best !== undefined) return best;
+
+  let fewest, fewCount = Infinity;
+  for (const key of Object.keys(table)) {
+    const count = key === '' ? 0 : key.split(',').length;
+    if (count < fewCount) { fewCount = count; fewest = table[key]; }
+  }
+  return fewest;
+}
+
 const layerSlider = document.getElementById('layerSlider');
 const layerVal = document.getElementById('layerVal');
 const layerMode = document.getElementById('layerMode');
@@ -739,7 +1044,7 @@ function updateBuildingView() {
   updateCropBoxVisual(minX, maxX, minZ, maxZ, areaMaxY);
 
   const groupedVisible = new Map();   // cleanName -> Positionen (für die Materialliste)
-  const renderGroups = new Map();     // Model-Key  -> { cleanName, geometry, positions }
+  const renderGroups = new Map();     // Schlüssel -> { cleanName, kind, geometry, groups?, positions }
 
   // Belegte Positionen für die Zaun-Verbindungserkennung
   const occupied = new Set();
@@ -764,16 +1069,41 @@ function updateBuildingView() {
       props.conn = conn;
     }
 
-    const key = modelKeyOf(name, props);
-    if (!renderGroups.has(key)) renderGroups.set(key, { cleanName: name, geometry: getBlockGeometry(name, props), positions: [] });
-    renderGroups.get(key).positions.push(b);
+    // Modellgetrieben (blockmodels.js) hat Vorrang; sonst prozeduraler Fallback.
+    const modelId = detailModels ? lookupModel(name, props) : undefined;
+    let key, entry;
+    if (modelId !== undefined) {
+      key = 'M' + modelId;
+      entry = renderGroups.get(key);
+      if (!entry) {
+        const built = buildModelGeometry(modelId);
+        entry = { cleanName: name, kind: 'model', geometry: built.geometry, groups: built.groups, positions: [] };
+        renderGroups.set(key, entry);
+      }
+    } else {
+      key = 'P' + modelKeyOf(name, props);
+      entry = renderGroups.get(key);
+      if (!entry) {
+        entry = { cleanName: name, kind: 'proc', geometry: getBlockGeometry(name, props), positions: [] };
+        renderGroups.set(key, entry);
+      }
+    }
+    entry.positions.push(b);
   }
 
   const dummy = new THREE.Object3D();
-  for (const { cleanName, geometry, positions } of renderGroups.values()) {
+  for (const g of renderGroups.values()) {
+    const { cleanName, positions } = g;
     const isGhost = activeXrayBlock !== null && activeXrayBlock !== cleanName;
-    const mat = getBlockMaterial(cleanName, isGhost);
-    const instancedMesh = new THREE.InstancedMesh(geometry, mat, positions.length);
+    let material, transparent;
+    if (g.kind === 'model') {
+      material = g.groups.map((gr) => (isGhost ? getGhostTextureMaterial(gr.tx) : getTextureMaterial(gr.tx, gr.tint)));
+      transparent = g.groups.some((gr) => textureKind(gr.tx).transparent);
+    } else {
+      material = getBlockMaterial(cleanName, isGhost);
+      transparent = !!material.transparent;
+    }
+    const instancedMesh = new THREE.InstancedMesh(g.geometry, material, positions.length);
 
     for (let i = 0; i < positions.length; i++) {
       const p = positions[i];
@@ -790,7 +1120,7 @@ function updateBuildingView() {
     }
     instancedMesh.instanceMatrix.needsUpdate = true;
     instancedMesh.userData.blocks = positions;
-    instancedMesh.castShadow = !mat.transparent && !isCrossPlant(cleanName);
+    instancedMesh.castShadow = !transparent && !isCrossPlant(cleanName);
     instancedMesh.receiveShadow = true;
     buildingGroup.add(instancedMesh);
   }

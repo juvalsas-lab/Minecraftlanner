@@ -19,11 +19,12 @@ Kein Build, kein Framework – reines HTML/JavaScript mit [three.js](https://thr
   [`misode/mcmeta`](https://github.com/misode/mcmeta) (Zweig `assets`).
 - **Materialliste** rechts: Anzahl pro Blocktyp plus Umrechnung in Stacks (64er).
   Ein Klick auf einen Eintrag aktiviert den **Röntgen-Blick** (X-Ray).
-- **Detaillierte Blockmodelle**: Fackeln, Türen, Treppen, Slabs, Zäune, Scheiben,
-  Pflanzen (gekreuzte Ebenen), Teppiche, Schienen u. a. werden als echte Formen statt
-  als Würfel dargestellt; die Ausrichtung aus dem Block-State (`facing`, `half`, `axis`)
-  wird berücksichtigt. Zäune/Zauntore verbinden sich mit Nachbarblöcken (Latten nur
-  in verbundenen Richtungen). Über die Checkbox abschaltbar (dann wieder Würfel).
+- **Echte Blockmodelle**: Für die meisten Blöcke werden Geometrie, UVs und
+  Flächen-Texturen direkt aus den Minecraft-Daten (mcmeta, siehe `blockmodels.js`)
+  übernommen – Grass Block (oben/seitlich/unten), Slabs, Treppen, Türen, Fackeln,
+  Logs, Furnaces usw. sehen damit wie im Spiel aus. Für Blöcke ohne exportiertes
+  Modell (z. B. Zäune/Mauern/Scheiben, `multipart`) greifen die prozeduralen Formen.
+  Über die Checkbox abschaltbar (dann wieder Würfel).
 - **Fackel-Licht**: leuchtende Blöcke (Fackeln, Laternen, Glowstone, Lava …) haben
   einen **Emissive-Glow**; zusätzlich beleuchtet ein Pool dynamischer **Punktlichter**
   die Umgebung rund um die nächstgelegenen Fackeln.
@@ -92,9 +93,11 @@ Der Optik-Bereich im linken Panel (Abschnitt „3. Optik / Shader") steuert:
 index.html                     Viewer (eigenständig, enthält den kompletten 3D-Code inline)
 main.js                        gleicher Viewer als ES-Modul (lädt blocktextures.js selbst)
 blocktextures.js               generierte Map Block-ID -> Original-Texturdatei
+blockmodels.js                 generierte echte Blockmodelle (Geometrie + UVs + Flächen-Texturen)
 legacyblocks.js                Map alter numerischer Block-IDs -> moderne Blocknamen
-tools/generate-blocktextures.py Generator für blocktextures.js
-tools/generate-test-schematic.mjs Generator für schem/test.schematic
+tools/generate-blocktextures.py    Generator für blocktextures.js
+tools/generate-blockmodels.mjs     Generator für blockmodels.js (Node)
+tools/generate-test-schematic.mjs  Generator für schem/test.schematic
 schem/test.schem               kleine Testvorlage (Sponge-Format)
 schem/test.schematic           kleine Testvorlage (klassisches Legacy-Format)
 ```
@@ -110,8 +113,14 @@ werden. Für unbekannte bzw. Modded-Blöcke greift zusätzlich eine Heuristik
 Neu erzeugen (z. B. nach einem Minecraft-Update):
 
 ```bash
+# Textur-Namen (Python)
 python3 tools/generate-blocktextures.py --out blocktextures.js
+# Blockmodelle (Node)
+node tools/generate-blockmodels.mjs --out blockmodels.js
 ```
 
 Beim ersten Aufruf wird der benötigte mcmeta-Checkout automatisch als
 sparse-checkout angelegt (benötigt `git` und Netzwerk).
+
+`blockmodels.js` enthält nur „nicht-triviale" Modelle (nicht den reinen 1×1×1-Würfel
+mit einer Textur); reine Würfel deckt der Viewer weiterhin über `blocktextures.js` ab.
