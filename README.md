@@ -1,6 +1,6 @@
 # Minecraftlanner
 
-Ein 3D-Viewer für Minecraft-**Schematic**-Dateien (`.schem`) im Browser. Er lädt
+Ein 3D-Viewer für Minecraft-**Schematic**-Dateien (`.schem` und `.schematic`) im Browser. Er lädt
 eine Bauvorlage, zeigt sie als begehbare 3D-Welt mit den **Original-Minecraft-Texturen**
 an und hilft beim Planen: Materialbedarf pro Blocktyp, Layer-Ansicht, Turm-Isolierung
 und ein Röntgen-Blick zum Hervorheben einzelner Blöcke.
@@ -9,8 +9,12 @@ Kein Build, kein Framework – reines HTML/JavaScript mit [three.js](https://thr
 
 ## Features
 
-- **`.schem` laden** (Sponge-Schematic: gzip-komprimiertes NBT mit `Width`/`Height`/`Length`,
-  `Palette` und varint-kodierten `BlockData`) direkt über den Datei-Dialog.
+- **`.schem` / `.schematic` laden** direkt über den Datei-Dialog:
+  - Sponge-Schematic (`.schem`): gzip-komprimiertes NBT mit `Width`/`Height`/`Length`,
+    `Palette` und varint-kodierten `BlockData`.
+  - Klassisches MCEdit/WorldEdit-Schematic (`.schematic`): numerische Legacy-Block-IDs
+    aus `Blocks`/`Data` (inkl. `AddBlocks`), inklusive Metadata-Varianten wie Wollfarben,
+    Holzarten und Steinarten (siehe `legacyblocks.js`).
 - **Original-Texturen** aller Blöcke, geladen aus
   [`misode/mcmeta`](https://github.com/misode/mcmeta) (Zweig `assets`).
 - **Materialliste** rechts: Anzahl pro Blocktyp plus Umrechnung in Stacks (64er).
@@ -31,7 +35,8 @@ python3 -m http.server 8000
 
 Dann im Browser öffnen: <http://localhost:8000/>
 
-Für den Test: links unter „.schem Datei einfügen" die Datei `schem/test.schem` wählen.
+Für den Test: links unter „.schem / .schematic Datei einfügen" die Datei `schem/test.schem`
+(modernes Format) oder `schem/test.schematic` (Legacy-Format) wählen.
 
 > **Hinweis:** Der Viewer benötigt eine Internetverbindung. three.js und pako werden von
 > CDNs geladen, die Block-Texturen von GitHub. Ohne Verbindung bleibt die 3D-Ansicht leer
@@ -59,8 +64,11 @@ Für den Test: links unter „.schem Datei einfügen" die Datei `schem/test.sche
 index.html                     Viewer (eigenständig, enthält den kompletten 3D-Code inline)
 main.js                        gleicher Viewer als ES-Modul (lädt blocktextures.js selbst)
 blocktextures.js               generierte Map Block-ID -> Original-Texturdatei
+legacyblocks.js                Map alter numerischer Block-IDs -> moderne Blocknamen
 tools/generate-blocktextures.py Generator für blocktextures.js
-schem/test.schem               kleine Testvorlage
+tools/generate-test-schematic.mjs Generator für schem/test.schematic
+schem/test.schem               kleine Testvorlage (Sponge-Format)
+schem/test.schematic           kleine Testvorlage (klassisches Legacy-Format)
 ```
 
 ## Texturen

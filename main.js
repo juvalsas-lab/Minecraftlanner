@@ -3,14 +3,23 @@ import { PointerLockControls } from 'three/addons/controls/PointerLockControls.j
 
 // Lädt die generierten Original-Texturnamen (Block-ID -> Texturdatei), falls sie
 // nicht bereits über ein <script src="blocktextures.js"> im Dokument geladen sind.
-if (typeof document !== 'undefined' && !globalThis.BLOCK_TEXTURES) {
-  await new Promise((resolve) => {
+function loadScript(src) {
+  return new Promise((resolve) => {
     const script = document.createElement('script');
-    script.src = 'blocktextures.js';
+    script.src = src;
     script.onload = resolve;
     script.onerror = resolve; // Ohne Map greift weiterhin die Heuristik.
     document.head.appendChild(script);
   });
+}
+
+if (typeof document !== 'undefined' && !globalThis.BLOCK_TEXTURES) {
+  await loadScript('blocktextures.js');
+}
+
+// Lädt die Zuordnung alter numerischer Block-IDs (Legacy-.schematic-Format).
+if (typeof document !== 'undefined' && !globalThis.LEGACY_BLOCKS) {
+  await loadScript('legacyblocks.js');
 }
 
 // --- 1. SZENE, KAMERA & RENDERER ---
@@ -636,58 +645,121 @@ function parseNBT(Uint8Buf) {
   return readPayload(10);
 }
 
+// Modernes Sponge-.schem: Palette + varint-kodierte BlockData.
+function decodeSpongeSchematic(schem, paletteObj, blockData) {
+  const width = schem.Width;
+  const length = schem.Length;
+
+  const idToBlock = {};
+  for (const [blockName, id] of Object.entries(paletteObj)) {
+    idToBlock[id] = blockName;
+  }
+
+  const decodedBlocks = [];
+  let i = 0;
+  let blockIndex = 0;
+  while (i < blockData.length) {
+    let value = 0;
+    let varintLength = 0;
+    while (true) {
+      const byte = blockData[i++];
+      value |= (byte & 127) << (varintLength++ * 7);
+      if ((byte & 128) !== 128) break;
+    }
+
+    const blockName = idToBlock[value] || 'minecraft:air';
+    if (!blockName.endsWith(':air') && blockName !== 'air' && !blockName.includes('cave_air')) {
+      const y = Math.floor(blockIndex / (width * length));
+      const z = Math.floor((blockIndex % (width * length)) / width);
+      const x = blockIndex % width;
+      decodedBlocks.push({
+        x: x - Math.floor(width / 2),
+        y: y,
+        z: z - Math.floor(length / 2),
+        type: blockName
+      });
+    }
+    blockIndex++;
+  }
+  return decodedBlocks;
+}
+
+// Klassisches MCEdit/WorldEdit-.schematic-Format: Width/Height/Length (Short),
+// Blocks/Data als Byte-Arrays mit numerischen Legacy-IDs, optional AddBlocks.
+function decodeLegacySchematic(schem) {
+  const width = schem.Width;
+  const height = schem.Height;
+  const length = schem.Length;
+  const blocks = schem.Blocks;
+  const data = schem.Data;
+  const addBlocks = schem.AddBlocks;
+  const total = width * height * length;
+
+  const resolve = (typeof globalThis.resolveLegacyBlock === 'function')
+    ? globalThis.resolveLegacyBlock
+    : (id) => id === 0 ? 'minecraft:air' : 'minecraft:stone';
+
+  const decodedBlocks = [];
+  for (let index = 0; index < total; index++) {
+    let blockId = blocks[index] & 0xFF;
+
+    // AddBlocks speichert die oberen 4 Bit der ID (je Byte zwei Blöcke, High-Nibble zuerst).
+    if (addBlocks) {
+      const packed = addBlocks[index >> 1] & 0xFF;
+      const high = (index % 2 === 0) ? (packed >> 4) : (packed & 0x0F);
+      blockId |= high << 8;
+    }
+
+    const meta = data ? (data[index] & 0xFF) : 0;
+    const blockName = resolve(blockId, meta);
+    if (blockName.endsWith(':air') || blockName === 'air' || blockName.includes('cave_air')) continue;
+
+    const y = Math.floor(index / (width * length));
+    const z = Math.floor((index % (width * length)) / width);
+    const x = index % width;
+    decodedBlocks.push({
+      x: x - Math.floor(width / 2),
+      y: y,
+      z: z - Math.floor(length / 2),
+      type: blockName
+    });
+  }
+  return decodedBlocks;
+}
+
 document.getElementById('fileInput').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
 
   try {
     const arrayBuffer = await file.arrayBuffer();
-    const inflated = window.pako.ungzip(new Uint8Array(arrayBuffer));
+    const raw = new Uint8Array(arrayBuffer);
+
+    // Standard ist gzip-komprimiert; unkomprimierte Dateien als Fallback zulassen.
+    let inflated = raw;
+    try {
+      inflated = window.pako.ungzip(raw);
+    } catch (_) {
+      inflated = raw;
+    }
+
     const nbt = parseNBT(inflated);
-    
     const schem = nbt.Schematic ? nbt.Schematic : nbt;
-    const width = schem.Width;
-    const height = schem.Height;
-    const length = schem.Length;
 
     const paletteObj = schem.Palette || (schem.Blocks && schem.Blocks.Palette);
     const blockData = schem.BlockData || (schem.Blocks && schem.Blocks.Data);
+    const legacyBlocks = ArrayBuffer.isView(schem.Blocks) ? schem.Blocks : null;
 
-    if (!paletteObj || !blockData) {
-      alert('Format nicht erkannt. Bitte nutze eine .schem Datei.');
+    let decodedBlocks;
+    if (paletteObj && blockData) {
+      // Modernes Sponge-.schem: Palette + varint-kodierte BlockData
+      decodedBlocks = decodeSpongeSchematic(schem, paletteObj, blockData);
+    } else if (legacyBlocks && schem.Width && schem.Height && schem.Length) {
+      // Klassisches .schematic: numerische Legacy-IDs
+      decodedBlocks = decodeLegacySchematic(schem);
+    } else {
+      alert('Format nicht erkannt. Bitte nutze eine .schem oder .schematic Datei.');
       return;
-    }
-
-    const idToBlock = {};
-    for (const [blockName, id] of Object.entries(paletteObj)) {
-      idToBlock[id] = blockName;
-    }
-
-    const decodedBlocks = [];
-    let i = 0;
-    let blockIndex = 0;
-    while (i < blockData.length) {
-      let value = 0;
-      let varintLength = 0;
-      while (true) {
-        const byte = blockData[i++];
-        value |= (byte & 127) << (varintLength++ * 7);
-        if ((byte & 128) !== 128) break;
-      }
-
-      const blockName = idToBlock[value] || 'minecraft:air';
-      if (!blockName.endsWith(':air') && blockName !== 'air' && !blockName.includes('cave_air')) {
-        const y = Math.floor(blockIndex / (width * length));
-        const z = Math.floor((blockIndex % (width * length)) / width);
-        const x = blockIndex % width;
-        decodedBlocks.push({
-          x: x - Math.floor(width / 2),
-          y: y,
-          z: z - Math.floor(length / 2),
-          type: blockName
-        });
-      }
-      blockIndex++;
     }
 
     setBuildingData(decodedBlocks);
